@@ -83,6 +83,8 @@ hsmm = (
 
 #### Builder Methods
 
+Every setter takes probabilities in **linear space** and converts them to log space automatically and immediately (a small smoothing term of 1e-30 is added before taking the log) — there is no separate step to opt into. The linear-space values you passed in remain available as `trans_mat_linear`, `emission_probs_linear`, `duration_probs_linear`, and `start_probs_linear`, e.g. for native backends or `print_model()`.
+
 | Method | Shape | Description |
 |---|---|---|
 | `set_emissions(symbols, probs)` | probs: (O, N) | Emission symbol list and probability matrix |
@@ -91,11 +93,13 @@ hsmm = (
 | `set_start_probs(probs)` | (N,) | Initial state distribution, sums to 1 |
 | `set_observations(obs_seq)` | (T,) | Integer observation sequence (indices into the symbols list) |
 
+Passing the same arrays directly to the constructor (`HSMM(states, emissions, trans_mat, emission_probs, duration_probs, start_probs)`) has the same effect — it just calls the corresponding setters internally, so a freshly constructed `HSMM` is always immediately ready for decoding, log space included.
+
 #### Key Methods
 
 **`decode() → np.ndarray`**
 
-Runs Viterbi decoding using the vectorized Python backend. Converts to log space internally and returns the most-likely state sequence of shape (T,).
+Runs Viterbi decoding using the vectorized Python backend against the model's log-space parameters and returns the most-likely state sequence of shape (T,).
 
 ```python
 path = hsmm.decode()
@@ -103,26 +107,9 @@ path = hsmm.decode()
 
 ---
 
-**`to_log_space()`**
-
-Converts `trans_mat`, `emission_probs`, `start_probs`, and `duration_probs` to log space in-place (adds a small smoothing term of 1e-30 before taking the log). `duration_probs_linear` is left unchanged — the native backends need it in linear space.
-
-Call this before passing the model to any native decoder:
-
-```python
-hsmm.to_log_space()
-result = decode_tensor_viterbi_omp(
-    N, hsmm.trans_mat, hsmm.emission_probs,
-    hsmm.duration_probs_linear, hsmm.start_probs,
-    hsmm.duration_probs, hsmm.obs_seq,
-)
-```
-
----
-
 **`reestimate(result: np.ndarray) → HSMM`**
 
-Re-estimates all model parameters from a Viterbi-decoded state path using hard-assignment EM (Viterbi training). Returns a **new** `HSMM` object in linear probability space, ready for the next iteration.
+Re-estimates all model parameters from a Viterbi-decoded state path using hard-assignment EM (Viterbi training). Returns a **new** `HSMM` object, built through the same setters described above, so it's already converted to log space and ready for the next iteration.
 
 Parameter updates:
 
@@ -133,16 +120,19 @@ Parameter updates:
 
 ```python
 for _ in range(n_iterations):
-    hsmm.to_log_space()
-    result = decode_tensor_viterbi_omp(...)
-    hsmm = hsmm.reestimate(result)   # returns new HSMM with updated linear-space parameters
+    result = decode_tensor_viterbi_omp(
+        N, hsmm.trans_mat, hsmm.emission_probs,
+        hsmm.duration_probs_linear, hsmm.start_probs,
+        hsmm.duration_probs, hsmm.obs_seq,
+    )
+    hsmm = hsmm.reestimate(result)   # returns a new, already log-space HSMM
 ```
 
 ---
 
 **`print_model()`**
 
-Prints a diagnostic summary of the model dimensions, states, start probabilities, transition matrix, emission matrix, and duration distributions. Call this **before** `to_log_space()` to display meaningful linear-space values.
+Prints a diagnostic summary of the model dimensions, states, start probabilities, transition matrix, emission matrix, and duration distributions, using the linear-space values (`*_linear`) so the numbers are directly meaningful probabilities.
 
 ---
 

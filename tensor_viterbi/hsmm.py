@@ -1,47 +1,76 @@
-import copy
 import random
 import numpy as np
 import json
 
+_LOG_SMOOTHING = 1e-30
+
+
+def _log(arr: np.ndarray) -> np.ndarray:
+    return np.log(arr + _LOG_SMOOTHING)
+
+
 class HSMM:
+    """HSMM parameters are always stored in log space (`trans_mat`,
+    `emission_probs`, `start_probs`, `duration_probs`), converted
+    automatically as soon as they are set — via the constructor or the
+    builder setters below. The linear-space values remain available as
+    `*_linear` attributes, e.g. for native backends or display.
+    """
+
     def __init__(self, states, emissions=None, trans_mat=None, emission_prob=None,
-                 duration_probs_linear=None, start_probs=None, duration_probs=None):
+                 duration_probs=None, start_probs=None):
         self.states = states
         self.emissions = emissions
-        self.trans_mat = trans_mat
-        self.emission_probs = emission_prob
-        self.duration_probs_linear = duration_probs_linear
-        self.start_probs = start_probs
-        self.duration_probs = duration_probs
         self.obs_seq = None
 
+        self.trans_mat_linear = None
+        self.emission_probs_linear = None
+        self.duration_probs_linear = None
+        self.start_probs_linear = None
+
+        self.trans_mat = None
+        self.emission_probs = None
+        self.duration_probs = None
+        self.start_probs = None
+
+        if trans_mat is not None:
+            self.set_transitions(trans_mat)
+        if emission_prob is not None:
+            self.set_emissions(emissions, emission_prob)
+        if duration_probs is not None:
+            self.set_duration_probs(duration_probs)
+        if start_probs is not None:
+            self.set_start_probs(start_probs)
+
     # ------------------------------------------------------------------
-    # Builder setters
+    # Builder setters — each one converts to log space immediately.
     # ------------------------------------------------------------------
 
     def set_transitions(self, trans_mat: np.ndarray) -> "HSMM":
-        """Transition matrix, shape (N, N). Rows must sum to 1."""
-        self.trans_mat = np.asarray(trans_mat, dtype=float)
+        """Transition matrix, shape (N, N), given in linear space. Rows must sum to 1."""
+        self.trans_mat_linear = np.asarray(trans_mat, dtype=float)
+        self.trans_mat = _log(self.trans_mat_linear)
         return self
 
     def set_emissions(self, emissions, emission_probs: np.ndarray) -> "HSMM":
-        """Emission symbols and probability matrix, shape (O, N)."""
+        """Emission symbols and probability matrix, shape (O, N), given in linear space."""
         self.emissions = emissions
-        self.emission_probs = np.asarray(emission_probs, dtype=float)
+        self.emission_probs_linear = np.asarray(emission_probs, dtype=float)
+        self.emission_probs = _log(self.emission_probs_linear)
         return self
 
     def set_duration_probs(self, duration_probs: np.ndarray) -> "HSMM":
-        """Duration probabilities in linear space, shape (D, N).
-        Stored as both duration_probs (later log-converted) and
-        duration_probs_linear (kept in linear space for native backends)."""
-        arr = np.asarray(duration_probs, dtype=float)
-        self.duration_probs = arr
-        self.duration_probs_linear = arr
+        """Duration probabilities, shape (D, N), given in linear space.
+        Stored as both duration_probs (log space) and duration_probs_linear
+        (kept in linear space for native backends)."""
+        self.duration_probs_linear = np.asarray(duration_probs, dtype=float)
+        self.duration_probs = _log(self.duration_probs_linear)
         return self
 
     def set_start_probs(self, start_probs: np.ndarray) -> "HSMM":
-        """Initial state distribution, shape (N,)."""
-        self.start_probs = np.asarray(start_probs, dtype=float)
+        """Initial state distribution, shape (N,), given in linear space."""
+        self.start_probs_linear = np.asarray(start_probs, dtype=float)
+        self.start_probs = _log(self.start_probs_linear)
         return self
 
     def set_observations(self, obs_seq: np.ndarray) -> "HSMM":
@@ -79,9 +108,7 @@ class HSMM:
                 + "\n".join(f"  - {m}" for m in missing)
             )
         from tensor_viterbi.viterbi.tensor import decode_log_tensor_viterbi_cached
-        h = copy.copy(self)
-        h.to_log_space()
-        return decode_log_tensor_viterbi_cached(h)
+        return decode_log_tensor_viterbi_cached(self)
 
     # ------------------------------------------------------------------
     # Utilities
@@ -90,20 +117,13 @@ class HSMM:
     def set_obs_sequence(self, obs_seq):
         self.obs_seq = obs_seq
 
-    def to_log_space(self):
-        smoothness = 1e-30
-        self.trans_mat = np.log(self.trans_mat + smoothness)
-        self.emission_probs = np.log(self.emission_probs + smoothness)
-        self.start_probs = np.log(self.start_probs + smoothness)
-        self.duration_probs = np.log(self.duration_probs + smoothness)
-
     def reestimate(self, result: np.ndarray) -> "HSMM":
         """Re-estimate parameters from a Viterbi-decoded state sequence.
 
         Computes new emission, transition, and duration probabilities by counting
         statistics directly from the decoded path, then normalizing. Duration
         probabilities are smoothed with a uniform ±3 neighbourhood kernel.
-        Returns a new HSMM in linear probability space ready for the next iteration.
+        Returns a new HSMM, converted to log space, ready for the next iteration.
         """
         N       = len(self.states)
         O       = len(self.emissions)
@@ -153,18 +173,20 @@ class HSMM:
         new_start_probs = np.zeros(N, dtype=float)
         new_start_probs[segments[0][0]] = 1.0
 
-        new_hsmm = copy.copy(self)
-        new_hsmm.trans_mat             = new_trans_mat
-        new_hsmm.emission_probs        = new_emission_probs
-        new_hsmm.duration_probs        = new_duration_probs
-        new_hsmm.duration_probs_linear = new_duration_probs
-        new_hsmm.start_probs           = new_start_probs
+        new_hsmm = HSMM(self.states)
+        new_hsmm.set_emissions(self.emissions, new_emission_probs)
+        new_hsmm.set_transitions(new_trans_mat)
+        new_hsmm.set_duration_probs(new_duration_probs)
+        new_hsmm.set_start_probs(new_start_probs)
+        new_hsmm.set_obs_sequence(self.obs_seq)
         return new_hsmm
 
     def print_model(self):
+        """Prints the model's linear-space probabilities (internally the
+        model always holds the log-space versions used for decoding)."""
         N = len(self.states)
         O = len(self.emissions) if self.emissions is not None else "?"
-        D = self.duration_probs.shape[0] if self.duration_probs is not None else "?"
+        D = self.duration_probs_linear.shape[0] if self.duration_probs_linear is not None else "?"
         T = len(self.obs_seq) if self.obs_seq is not None else "?"
 
         print("===== HSMM MODEL =====")
@@ -178,28 +200,28 @@ class HSMM:
         for i, s in enumerate(self.states):
             print(f"  [{i}] {s}")
 
-        if self.start_probs is not None:
+        if self.start_probs_linear is not None:
             print("\nStart probabilities (pi):")
             for i, s in enumerate(self.states):
-                print(f"  {s}: {self.start_probs[i]:.6f}")
+                print(f"  {s}: {self.start_probs_linear[i]:.6f}")
 
-        if self.trans_mat is not None:
+        if self.trans_mat_linear is not None:
             print("\nTransition matrix (N x N):")
             for i in range(N):
-                row = "  ".join(f"{self.trans_mat[i, j]:8.6f}" for j in range(N))
+                row = "  ".join(f"{self.trans_mat_linear[i, j]:8.6f}" for j in range(N))
                 print(f"  {row}")
 
-        if self.emission_probs is not None:
+        if self.emission_probs_linear is not None:
             print(f"\nEmission probabilities (O x N):")
             for o in range(len(self.emissions)):
-                row = "  ".join(f"{self.emission_probs[o, s]:8.6f}" for s in range(N))
+                row = "  ".join(f"{self.emission_probs_linear[o, s]:8.6f}" for s in range(N))
                 print(f"  Obs {o}: {row}")
 
-        if self.duration_probs is not None:
-            D = self.duration_probs.shape[0]
+        if self.duration_probs_linear is not None:
+            D = self.duration_probs_linear.shape[0]
             print("\nDuration probabilities:")
             for s in range(N):
-                row = "  ".join(f"{self.duration_probs[d, s]:.6f}" for d in range(D))
+                row = "  ".join(f"{self.duration_probs_linear[d, s]:.6f}" for d in range(D))
                 print(f"  State {self.states[s]}: [ {row} ]")
 
         print("\n======================")
@@ -239,7 +261,6 @@ class HSMM:
             sleep_emission_probs,
             sleep_duration_probs.T,
             sleep_start_probs,
-            sleep_duration_probs.T,
         )
         hsmm_sleep.set_obs_sequence(sleep_obs_seq)
 

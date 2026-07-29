@@ -8,12 +8,16 @@ import textwrap
 import sys
 import numpy as np
 
-from tensor_viterbi import HSMM, FastaReader
+from tensor_viterbi import HSMM
 from tensor_viterbi.viterbi import decode_tensor_viterbi_omp
+from modules.genomics import fetch_sequence, write_fasta, REGIONS, ASSEMBLY
 
 API_URL = "https://api.genome.ucsc.edu/getData/sequence" # UCSC REST API for fetching genomic sequences
-OBS_LIMIT = None                                      # max observations read from FASTA (None = whole file)
+OBS_LIMIT = None                                         # max observations read from FASTA (None = whole file)
 _BASES = ["A", "T", "C", "G"]
+
+ASSEMBLY = "hs1"  # T2T-CHM13 v2.0
+
 
 # Approximate euchromatic MSY boundaries.
 # - PAR1 end  -> start of euchromatic MSY
@@ -34,7 +38,6 @@ REGIONS = {
 #! UTILITIES, maybe I'll need to create a library fire for these
 #!
 #! -------------------------------------------------------------
-
 
 
 def _read_obs_gene(fasta_path: Path, limit: int | None = None) -> np.ndarray:
@@ -156,13 +159,20 @@ def run_gene(gene_hsmm: HSMM, fasta_path: Path) -> None:
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--outdir", default=".", help="Output directory.")
-    args = ap.parse_args()
 
-    assembly = "hs1"  # T2T-CHM13 v2.0
 
-    region = REGIONS[assembly]
+    #? GENOMIC MODULE
+    #! I want to create a Genomic Module to use viterbi decoding and learning. 
+    #! - The module must be able to read genomic sequences from FASTA files or fetch them from UCSC API.
+    #! - The module should allow users to define HSMMs with custom states, emissions, transitions, and duration probabilities.
+    
+
+    #? LIBRARY UPDATES
+    #! - Viterbi Learning should be included in the API
+    #! - The module should allow users to define HSMMs with custom states, emissions, transitions, and duration probabilities.
+
+
+    region = REGIONS[ASSEMBLY]
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     out_path = outdir / f"{region['label']}.fa"
@@ -170,7 +180,7 @@ if __name__ == "__main__":
     if out_path.exists():
         print(f"[skip] {out_path} already exists, skipping download.", file=sys.stderr)
     else:
-        seq = fetch_sequence(assembly,
+        seq = fetch_sequence(ASSEMBLY,
                              region["chrom"], region["start"], region["end"])
         header = (f"{region['label']} "
                   f"{region['chrom']}:{region['start']}-{region['end']} "

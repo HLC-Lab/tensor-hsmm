@@ -261,19 +261,16 @@ Plain text, 30 state-index characters per line:
 ## Requirements
 
 - Python >= 3.10
-- CMake >= 3.18 *(only for native C++/OMP/CUDA backends)*
-- A C++ compiler: GCC, Clang, Intel ICX, Cray CC, or Fujitsu FCC *(native backends only)*
-- CUDA >= 12.0 or ROCm *(GPU backend only)*
+- CMake >= 3.20 *(only for native C++/OMP/CUDA backends)*
+- A C++17 compiler with OpenMP support: GCC, Clang, Intel ICX, Cray CC, or Fujitsu FCC *(native backends only, OpenMP is required even for the GPU build)*
+- CUDA >= 12.0 (or ROCm, auto-detected from the environment) *(GPU backend only)*
 
 Python packages:
 
 ```
 numpy >= 2.4
-pandas >= 3.0
-matplotlib >= 3.10
-scipy >= 1.17
 pybind11 >= 3.0
-Cython >= 3.2
+requests >= 2.30
 ```
 
 ```bash
@@ -284,8 +281,6 @@ pip install -r requirements.txt
 
 ## Installation
 
-### Python-only (no native backends)
-
 ```bash
 git clone https://github.com/lor3ny/tensor-viterbi.git
 cd tensor-viterbi
@@ -293,17 +288,28 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-The pure-Python backends (`decode_log_tensor_viterbi_cached`, `decode_vanilla_viterbi`) work immediately. Native backends will raise `RuntimeError` until compiled.
+The pure-Python backends (`decode_log_tensor_viterbi_cached`, `decode_vanilla_viterbi`) work immediately, with no further steps. `decode_tensor_viterbi_cpp`, `decode_tensor_viterbi_omp`, and `decode_tensor_viterbi_cuda` raise `RuntimeError` until the native extension below is compiled.
 
-### With native backends (C++ / OMP / CUDA)
+### Compiling the native extension (C++ / OMP / CUDA)
+
+The native backends are a single pybind11 module (`tensor_viterbi/viterbi/_native.so`) built from `src/` via the root `CMakeLists.txt`. Configure once, then build:
 
 ```bash
-# Build for your system and toolchain
-python compile.py --system <system> --toolchain <toolchain>
+# CPU / OpenMP only (no GPU toolchain required)
+cmake -B build -DBUILD_GPU=OFF
+cmake --build build -j$(nproc)
 
-# Examples
-python compile.py --system workstation --toolchain gnu
-python compile.py --system a100        --toolchain cuda
+# GPU backend (CUDA or ROCm — auto-detected, or set -DGPU_PLATFORM=CUDA|ROCM)
+cmake -B build -DBUILD_GPU=ON
+cmake --build build -j$(nproc)
 ```
 
-Run `python compile.py --help` for available systems and toolchains. Both `compile.py` and the library must be run from the repository root.
+Both commands must be run from the repository root — the build writes `_native.so` directly into `tensor_viterbi/viterbi/`, which is where `native.py` looks for it. `build/` is a disposable, gitignored CMake working directory; delete it and re-run `cmake -B build ...` to reconfigure from scratch (e.g. when switching between `-DBUILD_GPU=ON`/`OFF`).
+
+Once built, `decode_tensor_viterbi_omp` (and, if compiled with `-DBUILD_GPU=ON`, `decode_tensor_viterbi_cuda`) are available immediately — no reinstall step needed, since `tensor_viterbi` imports the compiled `.so` directly:
+
+```python
+from tensor_viterbi.viterbi import decode_tensor_viterbi_omp
+```
+
+This is exactly what `viterbi_app.py` uses.

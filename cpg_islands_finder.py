@@ -7,84 +7,73 @@ import time
 from pathlib import Path
 
 import numpy as np
-import yaml
 
 from tensor_viterbi import HSMM
 from tensor_viterbi.viterbi import decode_tensor_viterbi_omp
-from modules.genomics import UCSCRegion, FastaReader, DNA_BASES
+from modules.genomics import UCSCRegion, FastaReader, DNA_BASES, fetch_cpg_ground_truth
 
-MODEL_CONFIG_PATH = Path(__file__).parent / "cpg_islands_model.yaml"
-
-
-def load_model_config(path: str | Path = MODEL_CONFIG_PATH) -> dict:
-    """Read the HSMM model definition (states, emissions, duration, ...) from YAML."""
-    with open(path) as f:
-        return yaml.safe_load(f)
+# k-mer size the model reads the FASTA with (k=2 -> dinucleotides).
+K = 2
 
 
-def _dinucleotide_emit(marginal: np.ndarray, cg_factor: float) -> np.ndarray:
-    """Expand a per-base marginal into a 16-symbol dinucleotide distribution
-    (index = i*len(BASES) + j for dinucleotide BASES[i]+BASES[j]), nudging
-    the CG entry by `cg_factor` before renormalizing."""
-    probs = np.outer(marginal, marginal).flatten()  # independent (expected) dinucleotide probs
-    cg_index = DNA_BASES.index("C") * len(DNA_BASES) + DNA_BASES.index("G")
-    probs[cg_index] *= cg_factor
-    return probs / probs.sum()
+def build_cpg_hsmm(obs_seq: np.ndarray) -> HSMM:
+
+    # HSMM model definition for CpG island detection: two states (Background,
+    # CpG-island), read as dinucleotides (k=2) since the defining feature of a
+    # CpG island isn't just GC content but the CG dinucleotide itself — genome-wide
+    # it's strongly suppressed (methylated C deaminates to T over evolutionary
+    # time), while inside CpG islands that suppression is absent (unmethylated).
+    STATES = ["Background", "CpG-island"]
+
+    # Dinucleotide emission probabilities per state, each summing to 1.
+    # Background: bulk genomic composition (30% A/T, 20% C/G) with CG suppressed
+    # to ~1/4 of its naive frequency. CpG-island: C/G-enriched (35% C/G) with CG
+    # left unsuppressed and then some.
+    BACKGROUND_EMIT = {
+        "AA": 0.092784, "AT": 0.092784, "AC": 0.061856, "AG": 0.061856,
+        "TA": 0.092784, "TT": 0.092784, "TC": 0.061856, "TG": 0.061856,
+        "CA": 0.061856, "CT": 0.061856, "CC": 0.041237, "CG": 0.010309,
+        "GA": 0.061856, "GT": 0.061856, "GC": 0.041237, "GG": 0.041237,
+    }
+    ISLAND_EMIT = {
+        "AA": 0.021201, "AT": 0.021201, "AC": 0.049470, "AG": 0.049470,
+        "TA": 0.021201, "TT": 0.021201, "TC": 0.049470, "TG": 0.049470,
+        "CA": 0.049470, "CT": 0.049470, "CC": 0.115430, "CG": 0.173145,
+        "GA": 0.049470, "GT": 0.049470, "GC": 0.115430, "GG": 0.115430,
+    }
+
+    MAX_DURATION = 1000  # uniform 1/D per state
 
 
-def build_cpg_hsmm(obs_seq: np.ndarray, cfg: dict | None = None) -> HSMM:
-    """Build the CpG-island HSMM from a config dict, as returned by `load_model_config()`.
+    N = len(STATES)
+    emissions = [a + b for a in DNA_BASES for b in DNA_BASES]
+    emission_probs = np.array([
+        [BACKGROUND_EMIT[dinuc], ISLAND_EMIT[dinuc]] for dinuc in emissions
+    ])
 
-    The config carries the same things this function used to hardcode:
-    states, per-state base marginal composition, CG dinucleotide
-    suppression/enrichment factors (k=2 only), max duration, and optionally
-    transitions/start probabilities. See cpg_islands_model.yaml.
-    """
-    if cfg is None:
-        cfg = load_model_config()
-
-    states = cfg["states"]
-    N = len(states)
-    if N != 2:
-        raise ValueError(
-            f"build_cpg_hsmm's config is fixed to exactly 2 states "
-            f"(background_marginal/island_marginal), got {N}: {states}"
-        )
-    k = cfg.get("k", 1)
-    emissions_cfg = cfg["emissions"]
-
-    if k == 1:
-        emissions = DNA_BASES
-        emission_probs = np.column_stack([
-            np.array(emissions_cfg["background_marginal"], dtype=float),
-            np.array(emissions_cfg["island_marginal"], dtype=float),
-        ])
-    elif k == 2:
-        background_marginal = np.array(emissions_cfg["background_marginal"], dtype=float)
-        island_marginal     = np.array(emissions_cfg["island_marginal"], dtype=float)
-        emissions = [a + b for a in DNA_BASES for b in DNA_BASES]
-        background_emit = _dinucleotide_emit(background_marginal, emissions_cfg["cg_suppression_background"])
-        island_emit      = _dinucleotide_emit(island_marginal, emissions_cfg["cg_enrichment_island"])
-        emission_probs = np.column_stack([background_emit, island_emit])
-    else:
-        raise ValueError(f"k={k} not supported by build_cpg_hsmm (only 1 or 2)")
-
-    D = cfg["duration"]["D"]
-    duration_probs = np.full((D, N), 1.0 / D)
-
-    trans_mat = (np.array(cfg["transitions"], dtype=float) if "transitions" in cfg
-                 else np.full((N, N), 1.0 / N))
-    start_probs = (np.array(cfg["start_probs"], dtype=float) if "start_probs" in cfg
-                   else np.full(N, 1.0 / N))
+    duration_probs = np.full((MAX_DURATION, N), 1.0 / MAX_DURATION)
+    trans_mat = np.full((N, N), 1.0 / N)
+    start_probs = np.full(N, 1.0 / N)
 
     return (
-        HSMM(states)
+        HSMM(STATES)
         .set_emissions(emissions, emission_probs)
         .set_transitions(trans_mat)
         .set_duration_probs(duration_probs)
         .set_start_probs(start_probs)
         .set_observations(obs_seq)
     )
+
+
+
+#! NON MI CONVINCE, SEMBRA MOLTO DIVERSO
+def score_against_ground_truth(predicted: np.ndarray, ground_truth: np.ndarray) -> float:
+    """Fraction of positions where `predicted` (decoded 0/1 states) agrees with
+    `ground_truth` (UCSC's own CpG-island calls, same 0/1 notation). The two
+    are truncated to the shorter length first, since `predicted` is indexed by
+    dinucleotide start (k=2) while `ground_truth` is indexed per base."""
+    n = min(len(predicted), len(ground_truth))
+    return float(np.mean(predicted[:n] == ground_truth[:n]))
 
 
 def write_islands(states: np.ndarray, fasta_path: Path, out_path: Path) -> None:
@@ -97,9 +86,7 @@ def write_islands(states: np.ndarray, fasta_path: Path, out_path: Path) -> None:
 
 def main() -> None:
 
-    cfg = load_model_config()
-    K = cfg.get("k", 1)  # k-mer size to read the FASTA with, driven by the same YAML
-
+    #! ----- FASTA DOWNLOAD ----- 
     dna_region = UCSCRegion(
         assembly="hs1",
         chrom="chrY",
@@ -108,8 +95,6 @@ def main() -> None:
         label="T2T-CHM13v2.0_chrY_euchromatic_MSY",
     )
     OBS_LIMIT = None  # max observations read from FASTA (None = whole file)
-
-
     fasta_path = dna_region.download()
 
     print(f"Loading {fasta_path} ...")
@@ -117,22 +102,19 @@ def main() -> None:
     obs_seq = FastaReader(fasta_path, symbols=DNA_BASES, k=K).read()
     if OBS_LIMIT is not None:
         obs_seq = obs_seq[:OBS_LIMIT]
+    #! ----- FASTA DOWNLOAD -----
 
-    cpg_hsmm = build_cpg_hsmm(obs_seq, cfg)
 
-    #! Whe should create an heuristic function check that verifies that the observations set declared
-    #! are compatible with the sequence.
-
-    N = len(cpg_hsmm.states)
-    T = len(cpg_hsmm.obs_seq)
-    D = cpg_hsmm.duration_probs_linear.shape[0]
-    print(f"states (N)={N}, timesteps (T)={T}, max duration (D)={D}\n")
-
+    #! ----- BUILD HSMM -----
+    cpg_hsmm = build_cpg_hsmm(obs_seq)
     cpg_hsmm.print_model()
+    #! ----- BUILD HSMM -----
 
+
+    #! ----- VITERBI DECODING -----
     t0 = time.perf_counter()
     result = decode_tensor_viterbi_omp(
-        N, cpg_hsmm.trans_mat, cpg_hsmm.emission_probs,
+        cpg_hsmm.N, cpg_hsmm.trans_mat, cpg_hsmm.emission_probs,
         cpg_hsmm.duration_probs_linear, cpg_hsmm.start_probs,
         cpg_hsmm.duration_probs, cpg_hsmm.obs_seq,
     )
@@ -143,8 +125,16 @@ def main() -> None:
     #* SPECIFIC OF CPG ISLANDS, I SHOULD FIND A MORE GENERAL WAY TO WRITE THE RESULTS
     n_background = int(np.sum(result == 0))
     n_island     = int(np.sum(result == 1))
-    print(f"-> decode time={elapsed:.4f} s  Background={n_background} ({100*n_background/T:.2f}%)  "
-            f"CpG-island={n_island} ({100*n_island/T:.2f}%)")
+    print(f"-> decode time={elapsed:.4f} s  Background={n_background} ({100*n_background/cpg_hsmm.T:.2f}%)  "
+            f"CpG-island={n_island} ({100*n_island/cpg_hsmm.T:.2f}%)")
+    #! ----- VITERBI DECODING -----
+
+
+    #! ----- UCSC GROUND TRUTH COMPARISON -----
+    ground_truth = fetch_cpg_ground_truth(dna_region)
+    score = score_against_ground_truth(result, ground_truth)
+    print(f"-> agreement with UCSC '{dna_region.chrom}' cpgIslandExt = {100*score:.2f}%")
+    #! ----- UCSC GROUND TRUTH COMPARISON -----
 
     write_islands(result, fasta_path, out_path)
     print(f"\nResult written -> {out_path}")

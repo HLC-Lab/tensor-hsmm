@@ -43,6 +43,30 @@ class HSMM:
             self.set_start_probs(start_probs)
 
     # ------------------------------------------------------------------
+    # Dimensions — derived from whatever has been set so far.
+    # ------------------------------------------------------------------
+
+    @property
+    def N(self) -> int:
+        """Number of states."""
+        return len(self.states)
+
+    @property
+    def O(self) -> int:
+        """Number of emission symbols."""
+        return len(self.emissions) if self.emissions is not None else 0
+
+    @property
+    def D(self) -> int:
+        """Max duration (number of duration bins)."""
+        return self.duration_probs_linear.shape[0] if self.duration_probs_linear is not None else 0
+
+    @property
+    def T(self) -> int:
+        """Observation sequence length."""
+        return len(self.obs_seq) if self.obs_seq is not None else 0
+
+    # ------------------------------------------------------------------
     # Builder setters — each one converts to log space immediately.
     # ------------------------------------------------------------------
 
@@ -125,11 +149,11 @@ class HSMM:
         probabilities are smoothed with a uniform ±3 neighbourhood kernel.
         Returns a new HSMM, converted to log space, ready for the next iteration.
         """
-        N       = len(self.states)
-        O       = len(self.emissions)
-        D       = self.duration_probs_linear.shape[0]
+        N       = self.N
+        O       = self.O
+        D       = self.D
         obs_seq = self.obs_seq.astype(int)
-        T       = len(obs_seq)
+        T       = self.T
 
         # Parse decoded path into (state, start_t, length) segments
         segments: list[tuple[int, int, int]] = []
@@ -184,10 +208,10 @@ class HSMM:
     def print_model(self):
         """Prints the model's linear-space probabilities (internally the
         model always holds the log-space versions used for decoding)."""
-        N = len(self.states)
-        O = len(self.emissions) if self.emissions is not None else "?"
-        D = self.duration_probs_linear.shape[0] if self.duration_probs_linear is not None else "?"
-        T = len(self.obs_seq) if self.obs_seq is not None else "?"
+        N = self.N
+        O = self.O
+        D = self.D
+        T = self.T
 
         print("===== HSMM MODEL =====")
         print(f"\nDimensions:")

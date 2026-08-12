@@ -9,32 +9,84 @@ import requests
 
 
 API_URL = "https://api.genome.ucsc.edu/getData/sequence" # UCSC REST API for fetching genomic sequences
+TRACK_API_URL = "https://api.genome.ucsc.edu/getData/track" # UCSC REST API for fetching annotation tracks
 OBS_LIMIT = None                                         # max observations read from FASTA (None = whole file)
 DNA_BASES = ["A", "T", "C", "G"]
 RNA_BASES = ["A", "U", "C", "G"]
 
-ASSEMBLY = "hs1"  # T2T-CHM13 v2.0
+
+#! -------------------------------------------------------------
+#!
+#! CpG Islands specific functions.
+#!
+#! -------------------------------------------------------------
 
 
-# Approximate euchromatic MSY boundaries.
-# - PAR1 end  -> start of euchromatic MSY
-# - Yq12 het. -> end of euchromatic MSY
-# NOTE: the centromere lies inside this interval; in hg19 it is a gap (Ns),
-REGIONS = {
-    "hs1": {            # T2T-CHM13 v2.0
-        "chrom": "chrY",
-        "start": 2_458_320,   # end of PAR1 (Rhie et al. 2023)
-        "end":   26_673_214,  # start of Yq12 heterochromatin
-        "label": "T2T-CHM13v2.0_chrY_euchromatic_MSY",
-    },
-}
+
+def write_bool_track(path: Path, header: str, mask: np.ndarray, width: int = 30) -> None:
+    """Write a 0/1 array to a plain-text file, FASTA-style: a '#' comment
+    header line followed by `width` characters per line."""
+    with path.open("w") as fh:
+        fh.write(f"# {header}\n")
+        flat = mask.astype(int)
+        for i in range(0, len(flat), width):
+            fh.write("".join(str(v) for v in flat[i:i + width]) + "\n")
+
+
+def read_bool_track(path: str | Path) -> np.ndarray:
+    """Read back a 0/1 array written by `write_bool_track`."""
+    def _iter_digits():
+        with open(path) as f:
+            for line in f:
+                if line.startswith("#"):
+                    continue
+                yield from line.strip()
+
+    return np.fromiter(_iter_digits(), dtype=np.int64)
+
+
+def fetch_cpg_ground_truth(region: "UCSCRegion", track: str = "cpgIslandExt",
+                            outdir: str | Path = ".") -> np.ndarray:
+    """Download UCSC's own CpG-island calls for `region` and encode them as a
+    per-base array using the same 0/1 notation as the HSMM (0=Background,
+    1=CpG-island), aligned to `region`'s local coordinates (index 0 = region.start).
+
+    Cached as `<outdir>/<region.label>.<track>.truth` (same 30-char-per-line
+    layout as `write_islands`); skips the download if the cache already exists.
+    """
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+    cache_path = outdir / f"{region.label}.{track}.truth"
+
+    if cache_path.exists():
+        print(f"[skip] {cache_path} already exists, skipping download.", file=sys.stderr)
+        return read_bool_track(cache_path)
+
+    params = {"genome": region.assembly, "track": track, "chrom": region.chrom,
+              "start": region.start, "end": region.end}
+    print(f"[info] Requesting '{track}' track for {region.chrom}:{region.start}-{region.end} "
+          f"from {region.assembly} ...", file=sys.stderr)
+    r = requests.get(TRACK_API_URL, params=params, timeout=300)
+    r.raise_for_status()
+    islands = r.json().get(track, [])
+
+    mask = np.zeros(region.end - region.start, dtype=np.int64)
+    for feat in islands:
+        lo = max(feat["chromStart"], region.start) - region.start
+        hi = min(feat["chromEnd"], region.end) - region.start
+        mask[lo:hi] = 1
+
+    header = f"{track} ground truth | {region.chrom}:{region.start}-{region.end} len={len(mask)}"
+    write_bool_track(cache_path, header, mask)
+    print(f"[done] Wrote {cache_path}", file=sys.stderr)
+    return mask
+
 
 #! -------------------------------------------------------------
 #!
 #! UTILITIES, maybe I'll need to create a library fire for these
 #!
 #! -------------------------------------------------------------
-
 
 
 def fetch_sequence(genome: str, chrom: str, start: int, end: int) -> str:

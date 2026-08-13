@@ -76,6 +76,136 @@ def score_against_ground_truth(predicted: np.ndarray, ground_truth: np.ndarray) 
     return float(np.mean(predicted[:n] == ground_truth[:n]))
 
 
+def _extract_islands(mask: np.ndarray) -> list[tuple[int, int]]:
+    """Maximal runs of 1s in a 0/1 array, as inclusive (start, end) index pairs."""
+    if len(mask) == 0:
+        return []
+    mask = mask.astype(np.int8)
+    diff = np.diff(mask)
+    starts = np.where(diff == 1)[0] + 1
+    ends = np.where(diff == -1)[0]
+    if mask[0] == 1:
+        starts = np.insert(starts, 0, 0)
+    if mask[-1] == 1:
+        ends = np.append(ends, len(mask) - 1)
+    return list(zip(starts.tolist(), ends.tolist()))
+
+
+def score_against_ground_truth_detailed(
+    predicted: np.ndarray,
+    ground_truth: np.ndarray,
+    max_shift: int = 50,
+    found_threshold: float = 0.5,
+) -> dict:
+    """Per-CpG-island comparison of `predicted` against `ground_truth`, on top
+    of the same whole-sequence `overall_score` as `score_against_ground_truth`.
+    The two arrays are truncated to the shorter length first.
+
+    Every maximal run of 1s in `predicted` is treated as one predicted island.
+    An island is first checked for any overlap at all with `ground_truth`
+    within [-max_shift, +max_shift] characters of its own position; with none,
+    it's hopeless (no shift could ever match it) and is skipped without
+    further analysis — just tallied into `not_found_in_ground_truth`. Islands
+    that do have some overlap get analyzed:
+      - `score`: fraction of the island's own positions that are also 1 in
+        `ground_truth`, i.e. a one-by-one match at the island's own coordinates.
+      - a search over `shift` in [-max_shift, +max_shift] characters looks for
+        a better-matching offset — `shift` > 0 means the matching ground-truth
+        island sits `shift` characters forward (higher coordinate); `shift` < 0
+        means it sits `abs(shift)` characters backward. `shifted_score` is the
+        match fraction at that best offset (equal to `score` when shift is 0).
+    If the best `shifted_score` still falls short of `found_threshold`, the
+    island is likewise dropped and only counted in `not_found_in_ground_truth`
+    rather than reported in detail — it's a false positive with no real
+    counterpart.
+
+    The same check runs in reverse over `ground_truth`'s own islands against
+    `predicted`, to catch real islands the model missed entirely — only the
+    count is kept (`not_found_in_predicted`), not per-island detail.
+
+    Returns a dict with:
+      - "overall_score": float, whole-sequence agreement fraction (same
+        definition as `score_against_ground_truth`).
+      - "islands": list of dicts, one per predicted CpG island *found* in
+        `ground_truth`, each with "start", "end" (inclusive), "length",
+        "score", "shift", "shifted_score".
+      - "not_found_in_ground_truth": number of predicted islands with no
+        counterpart in `ground_truth` (skipped or below `found_threshold`).
+      - "not_found_in_predicted": number of ground-truth islands with no
+        counterpart in `predicted` (false negatives the model missed).
+      - "min_length_found" / "max_length_found": shortest/longest length among
+        the *found* islands (None if none were found).
+    """
+    n = min(len(predicted), len(ground_truth))
+    predicted, ground_truth = predicted[:n], ground_truth[:n]
+    overall_score = float(np.mean(predicted == ground_truth))
+
+    # Prefix sums let any window's 1-count be fetched in O(1).
+    prefix_gt = np.concatenate(([0], np.cumsum(ground_truth.astype(np.int64))))
+    prefix_pred = np.concatenate(([0], np.cumsum(predicted.astype(np.int64))))
+
+    def make_window_sum(prefix: np.ndarray):
+        def window_sum(a: int, b: int) -> int:
+            """Count of 1s in the referenced array's [a, b]; out-of-bounds positions count as 0."""
+            lo, hi = max(a, 0), min(b, n - 1)
+            if lo > hi:
+                return 0
+            return int(prefix[hi + 1] - prefix[lo])
+        return window_sum
+
+    window_sum_gt = make_window_sum(prefix_gt)
+    window_sum_pred = make_window_sum(prefix_pred)
+
+    def best_shifted_score(start: int, end: int, length: int, window_sum) -> tuple[int, float] | None:
+        """Best (shift, score) in [-max_shift, +max_shift], or None if there's
+        no overlap anywhere in that range (hopeless, not worth searching)."""
+        if window_sum(start - max_shift, end + max_shift) == 0:
+            return None
+        best_shift, best_score = 0, window_sum(start, end) / length
+        for shift in range(-max_shift, max_shift + 1):
+            if shift == 0:
+                continue
+            s = window_sum(start + shift, end + shift) / length
+            if s > best_score:
+                best_shift, best_score = shift, s
+        return best_shift, best_score
+
+    islands = []
+    not_found_in_ground_truth = 0
+    for start, end in _extract_islands(predicted):
+        length = end - start + 1
+        result = best_shifted_score(start, end, length, window_sum_gt)
+        if result is None or result[1] < found_threshold:
+            not_found_in_ground_truth += 1
+            continue
+        best_shift, best_score = result
+        islands.append({
+            "start": start,
+            "end": end,
+            "length": length,
+            "score": window_sum_gt(start, end) / length,
+            "shift": best_shift,
+            "shifted_score": best_score,
+        })
+
+    not_found_in_predicted = 0
+    for start, end in _extract_islands(ground_truth):
+        length = end - start + 1
+        result = best_shifted_score(start, end, length, window_sum_pred)
+        if result is None or result[1] < found_threshold:
+            not_found_in_predicted += 1
+
+    lengths = [island["length"] for island in islands]
+    return {
+        "overall_score": overall_score,
+        "islands": islands,
+        "not_found_in_ground_truth": not_found_in_ground_truth,
+        "not_found_in_predicted": not_found_in_predicted,
+        "min_length_found": min(lengths) if lengths else None,
+        "max_length_found": max(lengths) if lengths else None,
+    }
+
+
 def write_islands(states: np.ndarray, fasta_path: Path, out_path: Path) -> None:
     with open(out_path, "w") as f:
         f.write(f"# CpG island predictions | source: {fasta_path.name} | generated by tensor-viterbi\n")
@@ -132,8 +262,20 @@ def main() -> None:
 
     #! ----- UCSC GROUND TRUTH COMPARISON -----
     ground_truth = fetch_cpg_ground_truth(dna_region)
-    score = score_against_ground_truth(result, ground_truth)
-    print(f"-> agreement with UCSC '{dna_region.chrom}' cpgIslandExt = {100*score:.2f}%")
+    score = score_against_ground_truth_detailed(result, ground_truth)
+    print(f"-> agreement with UCSC '{dna_region.chrom}' cpgIslandExt = {100*score['overall_score']:.2f}%")
+
+    print(f"-> predicted CpG islands found in ground truth ({len(score['islands'])}):")
+    for island in score["islands"]:
+        direction = "forward" if island["shift"] > 0 else "backward" if island["shift"] < 0 else "none"
+        print(f"     {island['start']}-{island['end']} (len={island['length']}): "
+              f"{100*island['score']:.2f}%  "
+              f"best_shift={island['shift']} ({direction}) -> {100*island['shifted_score']:.2f}%")
+
+    print(f"-> predicted islands not found in ground truth: {score['not_found_in_ground_truth']}")
+    print(f"-> ground truth islands not found in predicted: {score['not_found_in_predicted']}")
+    print(f"-> length range among found islands: "
+          f"{score['min_length_found']}-{score['max_length_found']}")
     #! ----- UCSC GROUND TRUTH COMPARISON -----
 
     write_islands(result, fasta_path, out_path)

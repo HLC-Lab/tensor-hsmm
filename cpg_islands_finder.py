@@ -237,7 +237,7 @@ def main() -> None:
 
     #! ----- BUILD HSMM -----
     cpg_hsmm = build_cpg_hsmm(obs_seq)
-    cpg_hsmm.print_model()
+    # cpg_hsmm.print_model()
     #! ----- BUILD HSMM -----
 
 

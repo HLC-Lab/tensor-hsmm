@@ -6,26 +6,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # --- Build options ---
-# Exactly one of BUILD_GPU=ON or BUILD_GPU=OFF must be chosen.
-# ON  → GPU backend only (CUDA or ROCm, detected from environment)
+# ON  → GPU backend (CUDA or ROCm, detected from environment)
 # OFF → CPU/OpenMP backend only
 option(BUILD_GPU "Build GPU (CUDA/ROCm) backend instead of CPU/OpenMP" ON)
-set(SYSTEM_NAME "" CACHE STRING "System name; output .so goes to tensor_viterbi/viterbi/<SYSTEM_NAME>/")
-if(NOT SYSTEM_NAME)
-    message(FATAL_ERROR "SYSTEM_NAME must be set (e.g. -DSYSTEM_NAME=mi250x)")
-endif()
-
-# --- LIKWID marker API (optional) ---
-option(USE_LIKWID "Enable LIKWID marker API instrumentation" OFF)
-if(USE_LIKWID)
-    find_path(LIKWID_INCLUDE_DIR likwid-marker.h REQUIRED)
-    find_library(LIKWID_LIB likwid REQUIRED)
-    get_filename_component(_likwid_lib_dir ${LIKWID_LIB} DIRECTORY)
-    set(LIKWID_LIB_DIR "${_likwid_lib_dir}" CACHE PATH "Directory containing liblikwid")
-    message(STATUS "LIKWID include: ${LIKWID_INCLUDE_DIR}")
-    message(STATUS "LIKWID library: ${LIKWID_LIB}")
-    message(STATUS "LIKWID lib dir: ${LIKWID_LIB_DIR}")
-endif()
 
 # --- OpenMP (always required — used by both CPU and GPU builds) ---
 find_package(OpenMP REQUIRED)
@@ -125,7 +108,7 @@ set_target_properties(_native PROPERTIES
     PREFIX ""
     OUTPUT_NAME "_native"
     SUFFIX ".so"
-    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/tensor_viterbi/viterbi/${SYSTEM_NAME}
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/tensor_viterbi/viterbi
 )
 
 target_compile_options(_native PRIVATE
@@ -163,13 +146,6 @@ if(BUILD_GPU AND GPU_PLATFORM STREQUAL "ROCM")
     target_link_libraries(_native PRIVATE hip::host)
 else()
     target_link_libraries(_native PRIVATE OpenMP::OpenMP_CXX)
-endif()
-
-
-if(USE_LIKWID)
-    target_compile_definitions(_native PRIVATE LIKWID_PERFMON)
-    target_include_directories(_native SYSTEM PRIVATE ${LIKWID_INCLUDE_DIR})
-    target_link_libraries(_native PRIVATE ${LIKWID_LIB})
 endif()
 
 

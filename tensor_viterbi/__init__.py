@@ -5,12 +5,7 @@ from .viterbi import (
     decode_vanilla_viterbi
 )
 
-try:
-    from .viterbi.native import decode_tensor_viterbi_cpp, decode_tensor_viterbi_cuda, decode_tensor_viterbi_omp
-except ImportError:
-    decode_tensor_viterbi_cpp = None
-    decode_tensor_viterbi_cuda = None
-    decode_tensor_viterbi_omp = None
+from .viterbi.native import decode_tensor_viterbi_cpp, decode_tensor_viterbi_cuda, decode_tensor_viterbi_omp
 
 __all__ = [
     "HSMM",

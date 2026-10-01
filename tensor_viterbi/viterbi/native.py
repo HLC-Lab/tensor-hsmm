@@ -7,44 +7,19 @@ import numpy as np
 if TYPE_CHECKING:
     from tensor_viterbi.hsmm import HSMM
 
-import importlib as _importlib
-import pathlib as _pathlib
-import sys as _sys
-
-_HERE = _pathlib.Path(__file__).parent.resolve()
-
-_native  = None
-_sys_name: str = ""
+try:
+    from . import _native
+except ImportError:
+    _native = None
 
 
-def configure(system: str, toolchain: str) -> None:
-    """Load the native extension for the given system/toolchain pair.
-
-    Must be called before any decode_* function is used.
-    Calling it again with a different pair reloads the extension.
-    """
-    global _native, _sys_name
-    _sys_name = f"{system}/{toolchain}"
-    _so_dir = str(_HERE / system / toolchain)
-    if _so_dir not in _sys.path:
-        _sys.path.insert(0, _so_dir)
-    try:
-        _native = _importlib.import_module("_native")
-    except ImportError as e:
-        raise RuntimeError(
-            f"[native] Could not load _native extension from '{_so_dir}'.\n"
-            f"Run: ./bench run --system {system} --toolchain {toolchain} --pack <pack> "
-            f"(it compiles automatically before dispatching jobs)\n"
-            f"Original error: {e}"
-        ) from e
-
-
-def _ensure_configured() -> None:
+def _ensure_loaded() -> None:
     if _native is None:
         raise RuntimeError(
-            "[native] Native extension not loaded.\n"
-            "Pass --system and --toolchain to bench, or call "
-            "tensor_viterbi.viterbi.native.configure(system, toolchain) directly."
+            "[native] Native extension not available.\n"
+            "Build it with:\n"
+            "  cmake -B build -DBUILD_GPU=OFF\n"
+            "  cmake --build build\n"
         )
 
 
@@ -57,7 +32,7 @@ def decode_tensor_viterbi_cpp(
         duration_probs,
         obs_seq,
 ) -> np.ndarray:
-    _ensure_configured()
+    _ensure_loaded()
     return _native.decode_tensor_viterbi_cpp(
         n_states, trans_mat, emission_probs,
         duration_probs_linear, start_probs, duration_probs, obs_seq,
@@ -73,7 +48,7 @@ def decode_tensor_viterbi_cuda(
         duration_probs,
         obs_seq,
 ) -> np.ndarray:
-    _ensure_configured()
+    _ensure_loaded()
     fn = getattr(_native, "decode_tensor_viterbi_cuda", None)
     if fn is None:
         raise RuntimeError("CUDA backend not available in this build.")
@@ -90,10 +65,9 @@ def decode_tensor_viterbi_omp(
         duration_probs,
         obs_seq,
 ) -> np.ndarray:
-    _ensure_configured()
+    _ensure_loaded()
     fn = getattr(_native, "decode_tensor_viterbi_omp", None)
     if fn is None:
         raise RuntimeError("OMP backend not available in this build.")
     return fn(n_states, trans_mat, emission_probs,
               duration_probs_linear, start_probs, duration_probs, obs_seq)
-

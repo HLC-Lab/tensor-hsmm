@@ -1,0 +1,41 @@
+Gene label encoding used in .gene files
+----------------------------------------
+0 = intergenic  : nucleotide falls outside any known gene (between genes)
+1 = intron      : nucleotide is inside a gene but in a non-coding intronic region
+2 = exon        : nucleotide is inside a coding exon (or UTR)
+                  with --use-cds flag: only protein-coding CDS regions, no UTRs
+
+Labeling logic (two-pass painting over GFF3 annotation):
+  1. Gene bodies are painted as intron (1)
+  2. Exon/CDS features overwrite those positions as exon (2)
+  3. Anything untouched remains intergenic (0)
+
+Why GFF3?
+---------
+GFF3 (Generic Feature Format version 3) is the standard bioinformatics format
+for storing genome annotations. Each line describes one genomic feature (gene,
+exon, CDS, etc.) with its chromosome, start/end coordinates, feature type, and
+attributes.
+
+Reasons it is used here:
+  - Official source: genome consortia (UCSC, NCBI, T2T) distribute annotations
+    in GFF3, so it is the authoritative reference for where genes are.
+  - Hierarchical structure: GFF3 encodes gene → mRNA → exon/CDS relationships,
+    which maps directly onto the two-pass painting logic (gene body first, then
+    exons on top).
+  - Coordinate-based: features are defined by (chrom, start, end), making it
+    straightforward to convert GFF3 positions into array indices for the label
+    vector.
+  - Widely supported: parseable with standard tools and easy to process line by
+    line without loading the entire genome into memory.
+
+
+
+States in a GFF3:
+- gene {1 - intron}
+- transcript {0 - intergenic}
+- exon {2 - exon}
+- intron {1 -  intergenic}
+- CDS {2 - exon}
+- start_codon {0 - intergenic}
+- stop_codon {0 - intergenic}

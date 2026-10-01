@@ -46,8 +46,6 @@ build/*
 .venv/*
 *.cmake
 CMakeCache.*
-hsmmlearn/build/*
-hsmmlearn_omp/build/*
 *.pyc
 *.so
 *.egg-info/
